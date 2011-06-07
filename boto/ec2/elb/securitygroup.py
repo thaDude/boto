@@ -1,5 +1,4 @@
-# Copyright (c) 2010 Spotify AB
-# Copyright (c) 2010 Yelp
+# Copyright (c) 2010 Reza Lotun http://reza.lotun.name
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the
@@ -20,25 +19,20 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-class BootstrapAction(object):
-    def __init__(self, name, path, bootstrap_action_args):
-        self.name = name
-        self.path = path
-
-        if isinstance(bootstrap_action_args, basestring):
-            bootstrap_action_args = [bootstrap_action_args]
-
-        self.bootstrap_action_args = bootstrap_action_args
-
-    def args(self):
-        args = []
-
-        if self.bootstrap_action_args:
-            args.extend(self.bootstrap_action_args)
-
-        return args
+class SecurityGroup(object):
+    def __init__(self, connection=None):
+        self.name = None
+        self.owner_alias = None
 
     def __repr__(self):
-        return '%s.%s(name=%r, path=%r, bootstrap_action_args=%r)' % (
-            self.__class__.__module__, self.__class__.__name__,
-            self.name, self.path, self.bootstrap_action_args)
+        return 'SecurityGroup(%s, %s)' % (self.name, self.owner_alias)
+
+    def startElement(self, name, attrs, connection):
+        pass
+
+    def endElement(self, name, value, connection):
+        if name == 'GroupName':
+            self.name = value
+        elif name == 'OwnerAlias':
+            self.owner_alias = value
+

@@ -24,6 +24,7 @@ import sys
 import os
 import boto
 import optparse
+import copy
 import boto.exception
 
 class Line(object):
@@ -48,20 +49,20 @@ class RequiredParamError(boto.exception.BotoClientError):
     def __init__(self, required):
         self.required = required
         s = 'Required parameters are missing: %s' % self.required
-        boto.exception.BotoClientError(s)
+        boto.exception.BotoClientError.__init__(self, s)
 
 class EncoderError(boto.exception.BotoClientError):
 
     def __init__(self, error_msg):
         s = 'Error encoding value (%s)' % error_msg
-        boto.exception.BotoClientError(s)
+        boto.exception.BotoClientError.__init__(self, s)
         
 class FilterError(boto.exception.BotoClientError):
 
     def __init__(self, filters):
         self.filters = filters
         s = 'Unknown filters: %s' % self.filters
-        boto.exception.BotoClientError(s)
+        boto.exception.BotoClientError.__init__(self, s)
         
 class Encoder:
 
@@ -158,6 +159,7 @@ class AWSQueryRequest(object):
         self.list_markers = []
         self.item_markers = []
         self.request_params = {}
+        self.connection_args = None
 
     def __repr__(self):
         return self.name()
@@ -227,11 +229,13 @@ class AWSQueryRequest(object):
             if value is not None:
                 if param.name in required:
                     required.remove(param.name)
-                if param.encoder:
-                    param.encoder(param, self.request_params, value)
-                else:
-                    Encoder.encode(param, self.request_params, value)
-            del self.args[python_name]
+                if param.request_param:
+                    if param.encoder:
+                        param.encoder(param, self.request_params, value)
+                    else:
+                        Encoder.encode(param, self.request_params, value)
+            if python_name in self.args:
+                del self.connection_args[python_name]
         if required:
             raise RequiredParamError(required)
         boto.log.debug('request_params: %s' % self.request_params)
@@ -247,11 +251,12 @@ class AWSQueryRequest(object):
         
     def send(self, verb='GET', **args):
         self.args.update(args)
+        self.connection_args = copy.copy(self.args)
         if 'debug' in self.args and self.args['debug'] >= 2:
             boto.set_stream_logger(self.name())
         self.process_args()
         self.process_filters()
-        conn = self.get_connection(**self.args)
+        conn = self.get_connection(**self.connection_args)
         self.http_response = conn.make_request(self.name(),
                                                self.request_params,
                                                verb=verb)
@@ -330,6 +335,8 @@ class AWSQueryRequest(object):
                     if len(param.items) == 1:
                         ptype = param.items[0]['type']
                         action = 'append'
+                elif param.cardinality != 1:
+                    action = 'append'
                 if ptype or action == 'store_true':
                     if param.short_name:
                         self.parser.add_option(param.optparse_short_name,
@@ -391,12 +398,12 @@ class AWSQueryRequest(object):
             else:
                 self.args['filters'] = d
         try:
-            response = self.send()
+            response = self.main()
             self.cli_formatter(response)
         except RequiredParamError, e:
             print e
             sys.exit(1)
-        except self.get_connection().ResponseError, err:
+        except self.ServiceClass.ResponseError, err:
             print 'Error(%s): %s' % (err.error_code, err.error_message)
 
     def _generic_cli_formatter(self, fmt, data, label=''):
@@ -432,6 +439,7 @@ class AWSQueryRequest(object):
         :type data: dict
         :param data: The data returned by AWS.
         """
-        self._generic_cli_formatter(self.Response, data)
+        if data:
+            self._generic_cli_formatter(self.Response, data)
 
 
