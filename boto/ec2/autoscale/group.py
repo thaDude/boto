@@ -187,8 +187,10 @@ class AutoScalingGroup(object):
             return self.availability_zones
         elif name == 'EnabledMetrics':
             self.enabled_metrics = ResultSet([('member', EnabledMetric)])
+            return self.enabled_metrics
         elif name == 'SuspendedProcesses':
             self.suspended_processes = ResultSet([('member', SuspendedProcess)])
+            return self.suspended_processes
         else:
             return
 
@@ -244,11 +246,11 @@ class AutoScalingGroup(object):
         self.desired_capacity = 0
         self.update()
 
-    def delete(self):
+    def delete(self, force_delete=False):
         """ Delete this auto-scaling group if no instances attached or no
         scaling activities in progress.
         """
-        return self.connection.delete_auto_scaling_group(self.name)
+        return self.connection.delete_auto_scaling_group(self.name, force_delete)
 
     def get_activities(self, activity_ids=None, max_records=50):
         """

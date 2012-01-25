@@ -35,7 +35,9 @@ class SecurityGroup(TaggedEC2Object):
         self.owner_id = owner_id
         self.name = name
         self.description = description
-        self.rules = []
+        self.vpc_id = None
+        self.rules = IPPermissionsList()
+        self.rules_egress = IPPermissionsList()
 
     def __repr__(self):
         return 'SecurityGroup:%s' % self.name
@@ -44,9 +46,10 @@ class SecurityGroup(TaggedEC2Object):
         retval = TaggedEC2Object.startElement(self, name, attrs, connection)
         if retval is not None:
             return retval
-        if name == 'item':
-            self.rules.append(IPPermissions(self))
-            return self.rules[-1]
+        if name == 'ipPermissions':
+            return self.rules
+        elif name == 'ipPermissionsEgress':
+            return self.rules_egress
         else:
             return None
 
@@ -57,6 +60,8 @@ class SecurityGroup(TaggedEC2Object):
             self.id = value
         elif name == 'groupName':
             self.name = value
+        elif name == 'vpcId':
+            self.vpc_id = value
         elif name == 'groupDescription':
             self.description = value
         elif name == 'ipRanges':
@@ -210,7 +215,6 @@ class SecurityGroup(TaggedEC2Object):
         sg = rconn.create_security_group(name or self.name, self.description)
         source_groups = []
         for rule in self.rules:
-            grant = rule.grants[0]
             for grant in rule.grants:
                 if grant.name:
                     if grant.name not in source_groups:
@@ -222,14 +226,34 @@ class SecurityGroup(TaggedEC2Object):
         return sg
 
     def instances(self):
+        """
+        Find all of the current instances that are running within this
+        security group.
+
+        :rtype: list of :class:`boto.ec2.instance.Instance`
+        :return: A list of Instance objects
+        """
+        # It would be more efficient to do this with filters now
+        # but not all services that implement EC2 API support filters.
         instances = []
         rs = self.connection.get_all_instances()
         for reservation in rs:
-            uses_group = [g.id for g in reservation.groups if g.id == self.name]
+            uses_group = [g.name for g in reservation.groups if g.name == self.name]
             if uses_group:
                 instances.extend(reservation.instances)
         return instances
 
+class IPPermissionsList(list):
+    
+    def startElement(self, name, attrs, connection):
+        if name == 'item':
+            self.append(IPPermissions(self))
+            return self[-1]
+        return None
+
+    def endElement(self, name, value, connection):
+        pass
+            
 class IPPermissions(object):
 
     def __init__(self, parent=None):

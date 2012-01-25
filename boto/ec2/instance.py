@@ -32,6 +32,16 @@ from boto.ec2.image import ProductCodes
 import base64
 
 class Reservation(EC2Object):
+    """
+    Represents a Reservation response object.
+
+    :ivar id: The unique ID of the Reservation.
+    :ivar owner_id: The unique ID of the owner of the Reservation.
+    :ivar groups: A list of Group objects representing the security
+                  groups associated with launched instances.
+    :ivar instances: A list of Instance objects launched in this
+                     Reservation.
+    """
     
     def __init__(self, connection=None):
         EC2Object.__init__(self, connection)
@@ -103,6 +113,7 @@ class Instance(TaggedEC2Object):
         self.state_reason = None
         self.group_name = None
         self.client_token = None
+        self.eventsSet = None
         self.groups = []
 
     def __repr__(self):
@@ -120,11 +131,14 @@ class Instance(TaggedEC2Object):
         elif name == 'productCodes':
             return self.product_codes
         elif name == 'stateReason':
-            self.state_reason = StateReason()
+            self.state_reason = SubParse('stateReason')
             return self.state_reason
         elif name == 'groupSet':
             self.groups = ResultSet([('item', Group)])
             return self.groups
+        elif name == "eventsSet":
+            self.eventsSet = SubParse('eventsSet')
+            return self.eventsSet
         return None
 
     def endElement(self, name, value, connection):
@@ -200,6 +214,8 @@ class Instance(TaggedEC2Object):
                 self.group_name = value
         elif name == 'clientToken':
             self.client_token = value
+        elif name == "eventsSet":
+            self.events = value
         else:
             setattr(self, name, value)
 
@@ -233,7 +249,8 @@ class Instance(TaggedEC2Object):
         Terminate the instance
         """
         rs = self.connection.terminate_instances([self.id])
-        self._update(rs[0])
+        if len(rs) > 0:
+            self._update(rs[0])
 
     def stop(self, force=False):
         """
@@ -245,15 +262,17 @@ class Instance(TaggedEC2Object):
         :rtype: list
         :return: A list of the instances stopped
         """
-        rs = self.connection.stop_instances([self.id])
-        self._update(rs[0])
+        rs = self.connection.stop_instances([self.id], force)
+        if len(rs) > 0:
+            self._update(rs[0])
 
     def start(self):
         """
         Start the instance.
         """
         rs = self.connection.start_instances([self.id])
-        self._update(rs[0])
+        if len(rs) > 0:
+            self._update(rs[0])
 
     def reboot(self):
         return self.connection.reboot_instances([self.id])
@@ -340,6 +359,7 @@ class Group:
 
     def __init__(self, parent=None):
         self.id = None
+        self.name = None
 
     def startElement(self, name, attrs, connection):
         return None
@@ -347,6 +367,8 @@ class Group:
     def endElement(self, name, value, connection):
         if name == 'groupId':
             self.id = value
+        elif name == 'groupName':
+            self.name = value
         else:
             setattr(self, name, value)
     
@@ -356,7 +378,7 @@ class ConsoleOutput:
         self.parent = parent
         self.instance_id = None
         self.timestamp = None
-        self.comment = None
+        self.output = None
 
     def startElement(self, name, attrs, connection):
         return None
@@ -364,6 +386,8 @@ class ConsoleOutput:
     def endElement(self, name, value, connection):
         if name == 'instanceId':
             self.instance_id = value
+        elif name == 'timestamp':
+            self.timestamp = value
         elif name == 'output':
             self.output = base64.b64decode(value)
         else:
@@ -371,28 +395,47 @@ class ConsoleOutput:
 
 class InstanceAttribute(dict):
 
+    ValidValues = ['instanceType', 'kernel', 'ramdisk', 'userData',
+                   'disableApiTermination', 'instanceInitiatedShutdownBehavior',
+                   'rootDeviceName', 'blockDeviceMapping', 'sourceDestCheck',
+                   'groupSet']
+
     def __init__(self, parent=None):
         dict.__init__(self)
+        self.instance_id = None
+        self.request_id = None
         self._current_value = None
 
     def startElement(self, name, attrs, connection):
-        return None
+        if name == 'blockDeviceMapping':
+            self[name] = BlockDeviceMapping()
+            return self[name]
+        elif name == 'groupSet':
+            self[name] = ResultSet([('item', Group)])
+            return self[name]
+        else:
+            return None
 
     def endElement(self, name, value, connection):
-        if name == 'value':
+        if name == 'instanceId':
+            self.instance_id = value
+        elif name == 'requestId':
+            self.request_id = value
+        elif name == 'value':
             self._current_value = value
-        else:
+        elif name in self.ValidValues:
             self[name] = self._current_value
 
-class StateReason(dict):
+class SubParse(dict):
 
-    def __init__(self, parent=None):
+    def __init__(self, section, parent=None):
         dict.__init__(self)
+        self.section = section
 
     def startElement(self, name, attrs, connection):
         return None
 
     def endElement(self, name, value, connection):
-        if name != 'stateReason':
+        if name != self.section:
             self[name] = value
             

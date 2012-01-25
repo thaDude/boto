@@ -34,6 +34,8 @@ import boto
 RegionData = {
     'us-east-1' : 'elasticloadbalancing.us-east-1.amazonaws.com',
     'us-west-1' : 'elasticloadbalancing.us-west-1.amazonaws.com',
+    'us-west-2' : 'elasticloadbalancing.us-west-2.amazonaws.com',
+    'sa-east-1' : 'elasticloadbalancing.sa-east-1.amazonaws.com',
     'eu-west-1' : 'elasticloadbalancing.eu-west-1.amazonaws.com',
     'ap-northeast-1' : 'elasticloadbalancing.ap-northeast-1.amazonaws.com',
     'ap-southeast-1' : 'elasticloadbalancing.ap-southeast-1.amazonaws.com'}
@@ -71,7 +73,7 @@ def connect_to_region(region_name, **kw_params):
 
 class ELBConnection(AWSQueryConnection):
 
-    APIVersion = boto.config.get('Boto', 'elb_version', '2011-04-05')
+    APIVersion = boto.config.get('Boto', 'elb_version', '2011-11-15')
     DefaultRegionName = boto.config.get('Boto', 'elb_region_name', 'us-east-1')
     DefaultRegionEndpoint = boto.config.get('Boto', 'elb_region_endpoint',
                                             'elasticloadbalancing.amazonaws.com')
@@ -83,8 +85,8 @@ class ELBConnection(AWSQueryConnection):
         """
         Init method to create a new connection to EC2 Load Balancing Service.
 
-        B{Note:} The region argument is overridden by the region specified in
-        the boto configuration file.
+        .. note:: The region argument is overridden by the region specified in
+            the boto configuration file.
         """
         if not region:
             region = RegionInfo(self, self.DefaultRegionName,
@@ -103,18 +105,19 @@ class ELBConnection(AWSQueryConnection):
     def build_list_params(self, params, items, label):
         if isinstance(items, str):
             items = [items]
-        for i, item in enumerate(items, 1):
-            params[label % i] = item
+        for index, item in enumerate(items):
+            params[label % (index + 1)] = item
 
     def get_all_load_balancers(self, load_balancer_names=None):
         """
         Retrieve all load balancers associated with your account.
 
         :type load_balancer_names: list
-        :param load_balancer_names: An optional list of load balancer names
+        :keyword load_balancer_names: An optional list of load balancer names.
 
-        :rtype: list
-        :return: A list of :class:`boto.ec2.elb.loadbalancer.LoadBalancer`
+        :rtype: :py:class:`boto.resultset.ResultSet`
+        :return: A ResultSet containing instances of
+            :class:`boto.ec2.elb.loadbalancer.LoadBalancer`
         """
         params = {}
         if load_balancer_names:
@@ -123,9 +126,14 @@ class ELBConnection(AWSQueryConnection):
         return self.get_list('DescribeLoadBalancers', params,
                              [('member', LoadBalancer)])
 
-    def create_load_balancer(self, name, zones, listeners):
+    def create_load_balancer(self, name, zones, listeners, subnets=None,
+        security_groups=None):
         """
-        Create a new load balancer for your account.
+        Create a new load balancer for your account. By default the load
+        balancer will be created in EC2. To create a load balancer inside a
+        VPC, parameter zones must be set to None and subnets must not be None.
+        The load balancer will be automatically created under the VPC that
+        contains the subnet(s) specified.
 
         :type name: string
         :param name: The mnemonic name associated with the new load balancer
@@ -147,18 +155,30 @@ class ELBConnection(AWSQueryConnection):
         :return: The newly created :class:`boto.ec2.elb.loadbalancer.LoadBalancer`
         """
         params = {'LoadBalancerName' : name}
-        for i, listener in enumerate(listeners, 1):
+        for index, listener in enumerate(listeners):
+            i = index + 1
             params['Listeners.member.%d.LoadBalancerPort' % i] = listener[0]
             params['Listeners.member.%d.InstancePort' % i] = listener[1]
             params['Listeners.member.%d.Protocol' % i] = listener[2]
             if listener[2]=='HTTPS':
                 params['Listeners.member.%d.SSLCertificateId' % i] = listener[3]
-        self.build_list_params(params, zones, 'AvailabilityZones.member.%d')
+        if zones:
+            self.build_list_params(params, zones, 'AvailabilityZones.member.%d')
+
+        if subnets:
+            self.build_list_params(params, subnets, 'Subnets.member.%d')
+
+        if security_groups:
+            self.build_list_params(params, security_groups, 
+                                    'SecurityGroups.member.%d')
+
         load_balancer = self.get_object('CreateLoadBalancer',
                                         params, LoadBalancer)
         load_balancer.name = name
         load_balancer.listeners = listeners
         load_balancer.availability_zones = zones
+        load_balancer.subnets = subnets
+        load_balancer.security_groups = security_groups
         return load_balancer
 
     def create_load_balancer_listeners(self, name, listeners):
@@ -181,7 +201,8 @@ class ELBConnection(AWSQueryConnection):
         :return: The status of the request
         """
         params = {'LoadBalancerName' : name}
-        for i, listener in enumerate(listeners, 1):
+        for index, listener in enumerate(listeners):
+            i = index + 1
             params['Listeners.member.%d.LoadBalancerPort' % i] = listener[0]
             params['Listeners.member.%d.InstancePort' % i] = listener[1]
             params['Listeners.member.%d.Protocol' % i] = listener[2]
@@ -213,8 +234,8 @@ class ELBConnection(AWSQueryConnection):
         :return: The status of the request
         """
         params = {'LoadBalancerName' : name}
-        for i, port in enumerate(ports, 1):
-            params['LoadBalancerPorts.member.%d' % i] = port
+        for index, port in enumerate(ports):
+            params['LoadBalancerPorts.member.%d' % (index + 1)] = port
         return self.get_status('DeleteLoadBalancerListeners', params)
 
     def enable_availability_zones(self, load_balancer_name, zones_to_add):
@@ -437,4 +458,71 @@ class ELBConnection(AWSQueryConnection):
         self.build_list_params(params, policies, 'PolicyNames.member.%d')
         return self.get_status('SetLoadBalancerPoliciesOfListener', params)
 
+    def apply_security_groups_to_lb(self, name, security_groups):
+        """
+        Applies security groups to the load balancer.
+        Applying security groups that are already registered with the 
+        Load Balancer has no effect.
+
+        :type name: string
+        :param name: The name of the Load Balancer
+
+        :type security_groups: List of strings
+        :param security_groups: The name of the security group(s) to add.
+
+        :rtype: List of strings
+        :return: An updated list of security groups for this Load Balancer.
+
+        """
+        params = {'LoadBalancerName' : name}
+        self.build_list_params(params, security_groups, 
+                               'SecurityGroups.member.%d')
+        return self.get_list('ApplySecurityGroupsToLoadBalancer', 
+                             params,
+                             None)
+
+    def attach_lb_to_subnets(self, name, subnets):
+        """
+        Attaches load balancer to one or more subnets.
+        Attaching subnets that are already registered with the 
+        Load Balancer has no effect.
+
+        :type name: string
+        :param name: The name of the Load Balancer
+
+        :type subnets: List of strings
+        :param subnets: The name of the subnet(s) to add.
+
+        :rtype: List of strings
+        :return: An updated list of subnets for this Load Balancer.
+
+        """
+        params = {'LoadBalancerName' : name}
+        self.build_list_params(params, subnets, 
+                               'Subnets.member.%d')
+        return self.get_list('AttachLoadBalancerToSubnets', 
+                             params,
+                             None)
+
+    def detach_lb_from_subnets(self, name, subnets):
+        """
+        Detaches load balancer from one or more subnets.
+
+        :type name: string
+        :param name: The name of the Load Balancer
+
+        :type subnets: List of strings
+        :param subnets: The name of the subnet(s) to detach.
+
+        :rtype: List of strings
+        :return: An updated list of subnets for this Load Balancer.
+
+        """
+        params = {'LoadBalancerName' : name}
+        self.build_list_params(params, subnets, 
+                               'Subnets.member.%d')
+        return self.get_list('DettachLoadBalancerFromSubnets', 
+                             params,
+                             None)
+ 
 

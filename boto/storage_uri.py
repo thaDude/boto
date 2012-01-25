@@ -1,4 +1,5 @@
 # Copyright 2010 Google Inc.
+# Copyright (c) 2011, Nexenta Systems Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the
@@ -40,6 +41,13 @@ class StorageUri(object):
     # https_connection_factory).
     connection_args = None
 
+    # Map of provider scheme ('s3' or 'gs') to AWSAuthConnection object. We
+    # maintain a pool here in addition to the connection pool implemented
+    # in AWSAuthConnection because the latter re-creates its connection pool
+    # every time that class is instantiated (so the current pool is used to
+    # avoid re-instantiating AWSAuthConnection).
+    provider_pool = {}
+
     def __init__(self):
         """Uncallable constructor on abstract base StorageUri class.
         """
@@ -70,7 +78,6 @@ class StorageUri(object):
         @rtype: L{AWSAuthConnection<boto.gs.connection.AWSAuthConnection>}
         @return: A connection to storage service provider of the given URI.
         """
-
         connection_args = dict(self.connection_args or ())
         # Use OrdinaryCallingFormat instead of boto-default
         # SubdomainCallingFormat because the latter changes the hostname
@@ -81,18 +88,26 @@ class StorageUri(object):
         # the resumable upload/download tests.
         from boto.s3.connection import OrdinaryCallingFormat
         connection_args['calling_format'] = OrdinaryCallingFormat()
+        if (hasattr(self, 'suppress_consec_slashes') and
+            'suppress_consec_slashes' not in connection_args):
+            connection_args['suppress_consec_slashes'] = (
+                self.suppress_consec_slashes)
         connection_args.update(kwargs)
         if not self.connection:
-            if self.scheme == 's3':
+            if self.scheme in self.provider_pool:
+                self.connection = self.provider_pool[self.scheme]
+            elif self.scheme == 's3':
                 from boto.s3.connection import S3Connection
                 self.connection = S3Connection(access_key_id,
                                                secret_access_key,
                                                **connection_args)
+                self.provider_pool[self.scheme] = self.connection
             elif self.scheme == 'gs':
                 from boto.gs.connection import GSConnection
                 self.connection = GSConnection(access_key_id,
                                                secret_access_key,
                                                **connection_args)
+                self.provider_pool[self.scheme] = self.connection
             elif self.scheme == 'file':
                 from boto.file.connection import FileConnection
                 self.connection = FileConnection(self)
@@ -174,7 +189,7 @@ class BucketStorageUri(StorageUri):
     """
 
     def __init__(self, scheme, bucket_name=None, object_name=None,
-                 debug=0, connection_args=None):
+                 debug=0, connection_args=None, suppress_consec_slashes=True):
         """Instantiate a BucketStorageUri from scheme,bucket,object tuple.
 
         @type scheme: string
@@ -189,6 +204,8 @@ class BucketStorageUri(StorageUri):
         @param connection_args: optional map containing args to be
             passed to {S3,GS}Connection constructor (e.g., to override
             https_connection_factory).
+        @param suppress_consec_slashes: If provided, controls whether
+            consecutive slashes will be suppressed in key paths.
 
         After instantiation the components are available in the following
         fields: uri, scheme, bucket_name, object_name.
@@ -199,6 +216,7 @@ class BucketStorageUri(StorageUri):
         self.object_name = object_name
         if connection_args:
             self.connection_args = connection_args
+        self.suppress_consec_slashes = suppress_consec_slashes
         if self.bucket_name and self.object_name:
             self.uri = ('%s://%s/%s' % (self.scheme, self.bucket_name,
                                         self.object_name))
@@ -218,10 +236,12 @@ class BucketStorageUri(StorageUri):
         if not self.bucket_name:
             raise InvalidUriError('clone_replace_name() on bucket-less URI %s' %
                                   self.uri)
-        return BucketStorageUri(self.scheme, self.bucket_name, new_name,
-                                self.debug)
+        return BucketStorageUri(
+            self.scheme, self.bucket_name, new_name, self.debug,
+            suppress_consec_slashes=self.suppress_consec_slashes)
 
     def get_acl(self, validate=True, headers=None, version_id=None):
+        """returns a bucket's acl"""
         if not self.bucket_name:
             raise InvalidUriError('get_acl on bucket-less URI (%s)' % self.uri)
         bucket = self.get_bucket(validate, headers)
@@ -231,12 +251,32 @@ class BucketStorageUri(StorageUri):
         self.check_response(acl, 'acl', self.uri)
         return acl
 
+    def get_def_acl(self, validate=True, headers=None):
+        """returns a bucket's default object acl"""
+        if not self.bucket_name:
+            raise InvalidUriError('get_acl on bucket-less URI (%s)' % self.uri)
+        bucket = self.get_bucket(validate, headers)
+        # This works for both bucket- and object- level ACLs (former passes
+        # key_name=None):
+        acl = bucket.get_def_acl(self.object_name, headers)
+        self.check_response(acl, 'acl', self.uri)
+        return acl
+
     def get_location(self, validate=True, headers=None):
         if not self.bucket_name:
             raise InvalidUriError('get_location on bucket-less URI (%s)' %
                                   self.uri)
         bucket = self.get_bucket(validate, headers)
         return bucket.get_location()
+
+    def get_subresource(self, subresource, validate=True, headers=None,
+                        version_id=None):
+        if not self.bucket_name:
+            raise InvalidUriError(
+                'get_subresource on bucket-less URI (%s)' % self.uri)
+        bucket = self.get_bucket(validate, headers)
+        return bucket.get_subresource(subresource, self.object_name, headers,
+                                      version_id)
 
     def add_group_email_grant(self, permission, email_address, recursive=False,
                               validate=True, headers=None):
@@ -334,14 +374,25 @@ class BucketStorageUri(StorageUri):
 
     def set_acl(self, acl_or_str, key_name='', validate=True, headers=None,
                 version_id=None):
+        """sets or updates a bucket's acl"""
         if not self.bucket_name:
             raise InvalidUriError('set_acl on bucket-less URI (%s)' %
                                   self.uri)
         self.get_bucket(validate, headers).set_acl(acl_or_str, key_name,
                                                    headers, version_id)
 
+    def set_def_acl(self, acl_or_str, key_name='', validate=True, headers=None,
+                version_id=None):
+        """sets or updates a bucket's default object acl"""
+        if not self.bucket_name:
+            raise InvalidUriError('set_acl on bucket-less URI (%s)' %
+                                  self.uri)
+        self.get_bucket(validate, headers).set_def_acl(acl_or_str, key_name,
+                                                   headers)
+
     def set_canned_acl(self, acl_str, validate=True, headers=None,
                        version_id=None):
+        """sets or updates a bucket's acl to a predefined (canned) value"""
         if not self.object_name:
             raise InvalidUriError('set_canned_acl on object-less URI (%s)' %
                                   self.uri)
@@ -349,12 +400,47 @@ class BucketStorageUri(StorageUri):
         self.check_response(key, 'key', self.uri)
         key.set_canned_acl(acl_str, headers, version_id)
 
+    def set_def_canned_acl(self, acl_str, validate=True, headers=None,
+                       version_id=None):
+        """sets or updates a bucket's default object acl to a predefined 
+           (canned) value"""
+        if not self.object_name:
+            raise InvalidUriError('set_canned_acl on object-less URI (%s)' %
+                                  self.uri)
+        key = self.get_key(validate, headers)
+        self.check_response(key, 'key', self.uri)
+        key.set_def_canned_acl(acl_str, headers, version_id)
+
+    def set_subresource(self, subresource, value, validate=True, headers=None,
+                        version_id=None):
+        if not self.bucket_name:
+            raise InvalidUriError(
+                'set_subresource on bucket-less URI (%s)' % self.uri)
+        bucket = self.get_bucket(validate, headers)
+        bucket.set_subresource(subresource, value, self.object_name, headers,
+                               version_id)
+
     def set_contents_from_string(self, s, headers=None, replace=True,
                                  cb=None, num_cb=10, policy=None, md5=None,
                                  reduced_redundancy=False):
         key = self.new_key(headers=headers)
         key.set_contents_from_string(s, headers, replace, cb, num_cb, policy,
                                      md5, reduced_redundancy)
+
+    def enable_logging(self, target_bucket, target_prefix=None, validate=True,
+                       headers=None, version_id=None):
+        if not self.bucket_name:
+            raise InvalidUriError(
+                'disable_logging on bucket-less URI (%s)' % self.uri)
+        bucket = self.get_bucket(validate, headers)
+        bucket.enable_logging(target_bucket, target_prefix, headers=headers)
+
+    def disable_logging(self, validate=True, headers=None, version_id=None):
+        if not self.bucket_name:
+            raise InvalidUriError(
+                'disable_logging on bucket-less URI (%s)' % self.uri)
+        bucket = self.get_bucket(validate, headers)
+        bucket.disable_logging(headers=headers)
 
 
 
@@ -366,7 +452,7 @@ class FileStorageUri(StorageUri):
     See file/README about how we map StorageUri operations onto a file system.
     """
 
-    def __init__(self, object_name, debug):
+    def __init__(self, object_name, debug, is_stream=False):
         """Instantiate a FileStorageUri from a path name.
 
         @type object_name: string
@@ -384,6 +470,7 @@ class FileStorageUri(StorageUri):
         self.object_name = object_name
         self.uri = 'file://' + object_name
         self.debug = debug
+        self.stream = is_stream
 
     def clone_replace_name(self, new_name):
         """Instantiate a FileStorageUri from the current FileStorageUri,
@@ -392,20 +479,38 @@ class FileStorageUri(StorageUri):
         @type new_name: string
         @param new_name: new object name
         """
-        return FileStorageUri(new_name, self.debug)
+        return FileStorageUri(new_name, self.debug, self.stream)
 
     def names_container(self):
-        """Returns True if this URI names a directory.
+        """Returns True if this URI is not representing input/output stream
+        and names a directory.
         """
-        return os.path.isdir(self.object_name)
+        if not self.stream:
+            return os.path.isdir(self.object_name)
+        else:
+            return False
 
     def names_singleton(self):
-        """Returns True if this URI names a file.
+        """Returns True if this URI names a file or
+        if URI represents input/output stream.
         """
-        return os.path.isfile(self.object_name)
+        if self.stream:
+            return True
+        else:
+            return os.path.isfile(self.object_name)
 
     def is_file_uri(self):
         return True
 
     def is_cloud_uri(self):
         return False
+
+    def is_stream(self):
+        """Retruns True if this URI represents input/output stream.
+        """
+        return self.stream
+
+    def close(self):
+        """Closes the underlying file.
+        """
+        self.get_key().close()

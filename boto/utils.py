@@ -54,6 +54,13 @@ from email.MIMEBase import MIMEBase
 from email.MIMEText import MIMEText
 from email.Utils import formatdate
 from email import Encoders
+import gzip
+import base64
+try:
+    from hashlib import md5
+except ImportError:
+    from md5 import md5
+
 
 try:
     import hashlib
@@ -63,13 +70,19 @@ except ImportError:
     _hashfn = md5.md5
 
 # List of Query String Arguments of Interest
-qsa_of_interest = ['acl', 'location', 'logging', 'partNumber', 'policy',
-                   'requestPayment', 'torrent', 'versioning', 'versionId',
-                   'versions', 'website', 'uploads', 'uploadId',
-                   'response-content-type', 'response-content-language',
-                   'response-expires', 'reponse-cache-control',
-                   'response-content-disposition',
-                   'response-content-encoding']
+qsa_of_interest = ['acl', 'defaultObjectAcl', 'location', 'logging', 
+                   'partNumber', 'policy', 'requestPayment', 'torrent', 
+                   'versioning', 'versionId', 'versions', 'website', 
+                   'uploads', 'uploadId', 'response-content-type', 
+                   'response-content-language', 'response-expires', 
+                   'response-cache-control', 'response-content-disposition',
+                   'response-content-encoding', 'delete', 'lifecycle']
+
+def unquote_v(nv):
+    if len(nv) == 1:
+        return nv
+    else:
+        return (nv[0], urllib.unquote(nv[1]))
 
 # generates the aws canonical string for the given parameters
 def canonical_string(method, path, headers, expires=None,
@@ -117,7 +130,7 @@ def canonical_string(method, path, headers, expires=None,
     if len(t) > 1:
         qsa = t[1].split('&')
         qsa = [ a.split('=') for a in qsa]
-        qsa = [ a for a in qsa if a[0] in qsa_of_interest ]
+        qsa = [ unquote_v(a) for a in qsa if a[0] in qsa_of_interest ]
         if len(qsa) > 0:
             qsa.sort(cmp=lambda x,y:cmp(x[0], y[0]))
             qsa = [ '='.join(a) for a in qsa ]
@@ -149,7 +162,10 @@ def get_aws_metadata(headers, provider=None):
     for hkey in headers.keys():
         if hkey.lower().startswith(metadata_prefix):
             val = urllib.unquote_plus(headers[hkey])
-            metadata[hkey[len(metadata_prefix):]] = unicode(val, 'utf-8')
+            try:
+                metadata[hkey[len(metadata_prefix):]] = unicode(val, 'utf-8')
+            except UnicodeDecodeError:
+                metadata[hkey[len(metadata_prefix):]] = val
             del headers[hkey]
     return metadata
 
@@ -204,7 +220,7 @@ def get_instance_metadata(version='latest', url='http://169.254.169.254'):
     be stored in the dict as a list of string values.  More complex
     fields such as public-keys and will be stored as nested dicts.
     """
-    return _get_instance_metadata('%s/%s/meta-data' % (url, version))
+    return _get_instance_metadata('%s/%s/meta-data/' % (url, version))
 
 def get_instance_userdata(version='latest', sep=None,
                           url='http://169.254.169.254'):
@@ -220,6 +236,7 @@ def get_instance_userdata(version='latest', sep=None,
     return user_data
 
 ISO8601 = '%Y-%m-%dT%H:%M:%SZ'
+ISO8601_MS = '%Y-%m-%dT%H:%M:%S.%fZ'
     
 def get_ts(ts=None):
     if not ts:
@@ -227,7 +244,12 @@ def get_ts(ts=None):
     return time.strftime(ISO8601, ts)
 
 def parse_ts(ts):
-    return datetime.datetime.strptime(ts, ISO8601)
+    try:
+        dt = datetime.datetime.strptime(ts, ISO8601)
+        return dt
+    except ValueError:
+        dt = datetime.datetime.strptime(ts, ISO8601_MS)
+        return dt
 
 def find_class(module_name, class_name=None):
     if class_name:
@@ -607,3 +629,106 @@ def pythonize_name(name, sep='_'):
         else:
             s += c
     return s
+
+def write_mime_multipart(content, compress=False, deftype='text/plain', delimiter=':'):
+    """Description:
+    :param content: A list of tuples of name-content pairs. This is used
+    instead of a dict to ensure that scripts run in order
+    :type list of tuples:
+
+    :param compress: Use gzip to compress the scripts, defaults to no compression
+    :type bool:
+
+    :param deftype: The type that should be assumed if nothing else can be figured out
+    :type str:
+
+    :param delimiter: mime delimiter
+    :type str:
+
+    :return: Final mime multipart
+    :rtype: str:
+    """
+    wrapper = MIMEMultipart()
+    for name,con in content:
+        definite_type = guess_mime_type(con, deftype)
+        maintype, subtype = definite_type.split('/', 1)
+        if maintype == 'text':
+            mime_con = MIMEText(con, _subtype=subtype)
+        else:
+            mime_con = MIMEBase(maintype, subtype)
+            mime_con.set_payload(con)
+            # Encode the payload using Base64
+            Encoders.encode_base64(mime_con)
+        mime_con.add_header('Content-Disposition', 'attachment', filename=name)
+        wrapper.attach(mime_con)
+    rcontent = wrapper.as_string()
+
+    if compress:
+        buf = StringIO.StringIO()
+        gz = gzip.GzipFile(mode='wb', fileobj=buf)
+        try:
+            gz.write(rcontent)
+        finally:
+            gz.close()
+        rcontent = buf.getvalue()
+
+    return rcontent
+
+def guess_mime_type(content, deftype):
+    """Description: Guess the mime type of a block of text
+    :param content: content we're finding the type of
+    :type str:
+
+    :param deftype: Default mime type
+    :type str:
+
+    :rtype: <type>:
+    :return: <description>
+    """
+    #Mappings recognized by cloudinit
+    starts_with_mappings={
+        '#include' : 'text/x-include-url',
+        '#!' : 'text/x-shellscript',
+        '#cloud-config' : 'text/cloud-config',
+        '#upstart-job'  : 'text/upstart-job',
+        '#part-handler' : 'text/part-handler',
+        '#cloud-boothook' : 'text/cloud-boothook'
+    }
+    rtype = deftype
+    for possible_type,mimetype in starts_with_mappings.items():
+        if content.startswith(possible_type):
+            rtype = mimetype
+            break
+    return(rtype)
+
+def compute_md5(fp, buf_size=8192):
+    """
+    Compute MD5 hash on passed file and return results in a tuple of values.
+
+    :type fp: file
+    :param fp: File pointer to the file to MD5 hash.  The file pointer
+               will be reset to the beginning of the file before the
+               method returns.
+
+    :type buf_size: integer
+    :param buf_size: Number of bytes per read request.
+
+    :rtype: tuple
+    :return: A tuple containing the hex digest version of the MD5 hash
+             as the first element, the base64 encoded version of the
+             plain digest as the second element and the file size as
+             the third element.
+    """
+    m = md5()
+    fp.seek(0)
+    s = fp.read(buf_size)
+    while s:
+        m.update(s)
+        s = fp.read(buf_size)
+    hex_md5 = m.hexdigest()
+    base64md5 = base64.encodestring(m.digest())
+    if base64md5[-1] == '\n':
+        base64md5 = base64md5[0:-1]
+    file_size = fp.tell()
+    fp.seek(0)
+    return (hex_md5, base64md5, file_size)

@@ -45,6 +45,12 @@ class EmrObject(object):
 class RunJobFlowResponse(EmrObject):
     Fields = set(['JobFlowId'])
 
+class AddInstanceGroupsResponse(EmrObject):
+    Fields = set(['InstanceGroupIds', 'JobFlowId'])
+    
+class ModifyInstanceGroupsResponse(EmrObject):
+    Fields = set(['RequestId'])
+    
 
 class Arg(EmrObject):
     def __init__(self, connection=None):
@@ -60,6 +66,11 @@ class BootstrapAction(EmrObject):
         'Name',
         'Path',
     ])
+
+    def startElement(self, name, attrs, connection):
+        if name == 'Args':
+            self.args = ResultSet([('member', Arg)])
+            return self.args
 
 
 class KeyValue(EmrObject):
@@ -117,6 +128,7 @@ class InstanceGroup(EmrObject):
 
 class JobFlow(EmrObject):
     Fields = set([
+        'AmiVersion',
         'AvailabilityZone',
         'CreationDateTime',
         'Ec2KeyName',

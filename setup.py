@@ -25,23 +25,22 @@
 
 try:
     from setuptools import setup
-    extra = {"test_suite": "tests.test.suite"}
+    extra = dict(test_suite="tests.test.suite", include_package_data=True)
 except ImportError:
     from distutils.core import setup
     extra = {}
 
 import sys
 
-from boto import Version
+from boto import __version__
 
-install_requires = []
-maj, min, micro, rel, serial = sys.version_info
-if (maj, min) == (2, 4):
-    # boto needs hashlib module which is not in py2.4
-    install_requires.append("hashlib")
+if sys.version_info <= (2, 4):
+    error = "ERROR: boto requires Python Version 2.5 or above...exiting."
+    print >> sys.stderr, error
+    sys.exit(1)
 
 setup(name = "boto",
-      version = Version,
+      version = __version__,
       description = "Amazon Web Services Library",
       long_description = "Python interface to Amazon's Web Services.",
       author = "Mitch Garnaat",
@@ -50,8 +49,8 @@ setup(name = "boto",
                  "bin/s3put", "bin/fetch_file", "bin/launch_instance",
                  "bin/list_instances", "bin/taskadmin", "bin/kill_instance",
                  "bin/bundle_image", "bin/pyami_sendmail", "bin/lss3",
-                 "bin/cq", "bin/route53"],
-      install_requires = install_requires,
+                 "bin/cq", "bin/route53", "bin/s3multiput", "bin/cwutil",
+                 "bin/instance_events"],
       url = "http://code.google.com/p/boto/",
       packages = ["boto", "boto.sqs", "boto.s3", "boto.gs", "boto.file",
                   "boto.ec2", "boto.ec2.cloudwatch", "boto.ec2.autoscale",
@@ -61,8 +60,8 @@ setup(name = "boto",
                   "boto.services", "boto.cloudfront", "boto.roboto",
                   "boto.rds", "boto.vpc", "boto.fps", "boto.emr", "boto.sns",
                   "boto.ecs", "boto.iam", "boto.route53", "boto.ses",
-                  "tests", "tests.devpay", "tests.ec2", "tests.sdb",
-                  "tests.sqs", "tests.s3"],
+                  "boto.cloudformation", "boto.sts", "boto.dynamodb"],
+      package_data = {"boto.cacerts": ["cacerts.txt"]},
       license = "MIT",
       platforms = "Posix; MacOS X; Windows",
       classifiers = ["Development Status :: 5 - Production/Stable",
